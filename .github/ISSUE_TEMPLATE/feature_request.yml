@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused improvement to the protocol or native scripts.
+title: "proposal: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: failure
+    attributes:
+      label: Failure or friction
+      description: What concrete failure does this prevent or make cheaper?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This can remain dependency-free and locally inspectable.
+          required: true

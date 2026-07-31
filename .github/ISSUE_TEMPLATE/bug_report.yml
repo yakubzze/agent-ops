@@ -1,0 +1,66 @@
+name: Bug report
+description: Report a reproducible problem or unsafe edge case.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If any memory may have been hidden or overwritten, stop using the linker
+        and preserve both the source, destination, and any `memory.backup-*`
+        directory before continuing.
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - memory-doctor (Bash)
+        - memory-doctor (PowerShell)
+        - link-memory (Bash)
+        - link-memory (PowerShell)
+        - Protocol or templates
+        - Documentation
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0-preview or commit SHA
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, shell or PowerShell version, Claude Code version, and filesystem or sync provider.
+      placeholder: Windows 11, PowerShell 7.6, Claude Code 2.x, local NTFS
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Use temporary paths and redact private note contents.
+      placeholder: Exact command, directory shape, output, and exit code.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed secrets, client data, usernames, and private memory contents from this report.
+          required: true
