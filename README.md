@@ -175,6 +175,64 @@ Claude loads only the first **200 lines or 25 KB of `MEMORY.md`**, whichever com
 first. Keep it a concise index and let detail live in topic files it reads on
 demand.
 
+### Run it on every session
+
+A check you have to remember is a check you will skip. Claude Code's `SessionStart`
+hook runs the doctor before you type anything:
+
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "pwsh",
+            "args": [
+              "-NoProfile",
+              "-File",
+              "<path-to>/agent-ops/scripts/memory-doctor.ps1",
+              "-Quiet",
+              "-StableRoot",
+              "<your-store-root>"
+            ],
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+On macOS and Linux, run `bash` against `<path-to>/agent-ops/scripts/memory-doctor.sh`
+with `--quiet --stable-root <your-store-root>`. `--quiet` prints only entries that
+need attention, so a healthy setup adds nothing to your session.
+
+**Put this in `~/.claude/settings.json`, not in a repository.** Both values in it
+are facts about one machine — where you cloned this repo and where your store
+lives — and neither is true on anyone else's. User settings apply to every
+project, which is what you want: the failure this catches is not project-specific,
+and a per-project copy would miss the projects you forgot to configure. Nothing
+about wiring the check needs to be committed anywhere.
+
+> **A check that always fails is not a check.** The doctor exits non-zero while
+> anything needs attention. That is what makes it usable as a gate — and useless
+> the moment you leave something unattended. Two entries you have decided to live
+> with mean every session opens red, and the day a third one appears, nothing
+> about the output looks different.
+>
+> Measured: a setup running this exact hook carried two `AT RISK` entries for
+> months. When a directory move silently orphaned two more links, the summary went
+> from "2 at risk" to "2 at risk, 2 orphaned" at the top of every session, and
+> nobody read it. Both orphans were found later, by hand, during an unrelated
+> audit — with the alarm running correctly the whole time.
+>
+> Drive it to zero and keep it there. Fix an entry, or move its data somewhere the
+> doctor calls stable. "Known bad, ignore it" is not a state you can hold for one
+> entry — it costs you the whole alarm.
+
 ## Moving existing memory safely
 
 Pointing at a new directory selects a new location. **It does not move what is
