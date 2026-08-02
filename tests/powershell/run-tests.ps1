@@ -455,6 +455,96 @@ try {
     Assert-Match $result.Output 'ProjectsDir must not be a filesystem root'
   }
 
+  function New-SettingsProject {
+    param(
+      [Parameter(Mandatory)] [string] $Root,
+      [Parameter(Mandatory)] [string] $Value,
+      [string] $Under = 'plain-parent',
+      [string] $FileName = 'settings.local.json'
+    )
+    $project = Join-Path (Join-Path $Root $Under) 'my-app'
+    New-Item -ItemType Directory -Path (Join-Path $project '.claude') -Force | Out-Null
+    $payload = [pscustomobject]@{ autoMemoryDirectory = $Value } | ConvertTo-Json
+    Set-Content -LiteralPath (Join-Path (Join-Path $project '.claude') $FileName) -Value $payload
+    return $project
+  }
+
+  Test-Case 'doctor flags an absolute memory directory declared in a synced settings file' {
+    $root = New-TestRoot
+    $tree = New-Project $root
+    $store = Join-Path $root 'store'
+    New-Item -ItemType Directory -Path $store | Out-Null
+    # The failure this check exists for: the settings file travels to the other
+    # machine, where an absolute path written on this one cannot resolve.
+    $project = New-SettingsProject -Root $root -Value $store -Under 'Dropbox'
+    $result = Invoke-Tool $doctor @('-ProjectsDir', $tree.Projects, '-ProjectDir', $project)
+    Assert-Equal 1 $result.Code $result.Output
+    Assert-Match $result.Output 'AT RISK.*SYNCED settings file'
+    Assert-Match $result.Output 'declared memory directory issue'
+  }
+
+  Test-Case 'doctor leaves an absolute declaration alone when the settings file is not synced' {
+    $root = New-TestRoot
+    $tree = New-Project $root
+    $store = Join-Path $root 'store'
+    New-Item -ItemType Directory -Path $store | Out-Null
+    $project = New-SettingsProject -Root $root -Value $store
+    $result = Invoke-Tool $doctor @('-ProjectsDir', $tree.Projects, '-ProjectDir', $project)
+    Assert-Equal 0 $result.Code $result.Output
+    Assert-Match $result.Output 'OK.*settings\.local\.json'
+  }
+
+  Test-Case 'doctor treats a ~/ declaration as portable even inside a synced folder' {
+    $root = New-TestRoot
+    $tree = New-Project $root
+    # ~/ resolves per machine, so it is the one absolute-ish form that survives
+    # syncing. It must not be reported as relative, nor as the synced-path trap.
+    $project = New-SettingsProject -Root $root -Value '~/agent-memory/my-app' -Under 'OneDrive'
+    $result = Invoke-Tool $doctor @('-ProjectsDir', $tree.Projects, '-ProjectDir', $project)
+    Assert-True ($result.Output -notmatch 'relative value') 'a ~/ value was misread as relative'
+    Assert-True ($result.Output -notmatch 'SYNCED settings file') 'a ~/ value was flagged as the synced-path trap'
+  }
+
+  Test-Case 'doctor flags a relative memory directory as ignored' {
+    $root = New-TestRoot
+    $tree = New-Project $root
+    $project = New-SettingsProject -Root $root -Value 'notes/memory'
+    $result = Invoke-Tool $doctor @('-ProjectsDir', $tree.Projects, '-ProjectDir', $project)
+    Assert-Equal 1 $result.Code $result.Output
+    Assert-Match $result.Output 'AT RISK.*relative value'
+  }
+
+  Test-Case 'doctor flags a declared memory directory that does not exist' {
+    $root = New-TestRoot
+    $tree = New-Project $root
+    $project = New-SettingsProject -Root $root -Value (Join-Path $root 'never-created')
+    $result = Invoke-Tool $doctor @('-ProjectsDir', $tree.Projects, '-ProjectDir', $project)
+    Assert-Equal 1 $result.Code $result.Output
+    Assert-Match $result.Output 'AT RISK.*does not exist'
+  }
+
+  Test-Case 'doctor skips the settings check on request' {
+    $root = New-TestRoot
+    $tree = New-Project $root
+    $project = New-SettingsProject -Root $root -Value 'notes/memory'
+    $result = Invoke-Tool $doctor @('-ProjectsDir', $tree.Projects, '-ProjectDir', $project, '-SkipSettingsCheck')
+    Assert-Equal 0 $result.Code $result.Output
+    Assert-True ($result.Output -notmatch 'declared memory directory') 'settings were inspected despite -SkipSettingsCheck'
+  }
+
+  Test-Case 'doctor reports unreadable settings JSON instead of ignoring it' {
+    $root = New-TestRoot
+    $tree = New-Project $root
+    $project = Join-Path $root 'broken-app'
+    New-Item -ItemType Directory -Path (Join-Path $project '.claude') -Force | Out-Null
+    # Names the key and then fails to yield a value - the same payload the Bash
+    # suite uses, so both implementations are held to one answer.
+    Set-Content -LiteralPath (Join-Path $project '.claude/settings.local.json') -Value '{ "autoMemoryDirectory": }'
+    $result = Invoke-Tool $doctor @('-ProjectsDir', $tree.Projects, '-ProjectDir', $project)
+    Assert-Equal 1 $result.Code $result.Output
+    Assert-Match $result.Output 'INVALID'
+  }
+
   if (-not $IsWindows) {
     Test-Case 'linker fails closed for an uninspectable project directory' {
       $root = New-TestRoot

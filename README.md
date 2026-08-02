@@ -18,7 +18,7 @@ Three things break when you run AI coding agents on real projects, in this order
 Every rule here exists because one of those happened first. The failure is
 written next to the rule, with what it cost.
 
-> **v0.1 preview.** The rules are stable; the scripts and file formats may still
+> **v0.2 preview.** The rules are stable; the scripts and file formats may still
 > change before v1. Preview a dry run before migrating real memory, and keep the
 > backup until you have verified the result.
 
@@ -106,6 +106,14 @@ needs attention, so it works as a pre-flight check. Pass `-StableRoot` (or
 `--stable-root`) to have it verify that links actually land inside the store you
 chose, rather than just that they resolve.
 
+It also reads the `.claude` settings of the current directory and reports a
+declared `autoMemoryDirectory` that cannot work as written — a relative value the
+agent will ignore, a directory that does not exist, or an absolute path in a
+settings file that is itself inside a synced folder. It does not resolve settings
+precedence, so this tells you the declaration would fail if applied, not that it
+was applied. Point it elsewhere with `--project-dir` (repeatable), or turn it off
+with `--skip-settings-check`.
+
 ### Give Claude Code a stable memory directory
 
 Claude Code can be told where to keep memory, which is cleaner than any
@@ -122,6 +130,20 @@ The value must be absolute or begin with `~/`. Project and local settings take
 effect only after you accept Claude Code's workspace-trust dialog for that folder.
 Inspect the path before accepting — the gate exists because a cloned repository
 can otherwise redirect where memory gets written.
+
+> **If the project itself lives in a synced folder, use a link instead.**
+> `.claude/settings.local.json` is per-machine only while it sits on one machine.
+> Put the project inside iCloud, Dropbox or OneDrive and that file syncs like any
+> other, carrying one machine's absolute path to a machine where it does not
+> exist. The agent then writes memory somewhere local and nothing warns you —
+> rule 1's own failure, arriving through rule 1's own fix.
+>
+> `~/agent-memory/my-app` survives syncing because `~` resolves per machine. A
+> path *into* the synced folder usually does not: the same store is
+> `~/Library/Mobile Documents/…` on macOS and `~/iCloudDrive/…` on Windows, so no
+> single string is correct on both. There, a per-machine link is the mechanism and
+> the setting is the fallback — the reverse of the advice above. The doctor flags
+> this case.
 
 The same JSON is in [`examples/claude-settings.json`](examples/claude-settings.json):
 
@@ -228,7 +250,7 @@ Claims in `NOW.md` help sessions coordinate, but they are signals, not locks. Se
 | `templates/NOW.md` | Expiring short-term status and work claims |
 | `templates/MEMORY.md` | Concise index for durable memory |
 | `templates/memory-note.md` | One durable note = one fact |
-| `scripts/memory-doctor.*` | Read-only audit of the on-disk memory layout |
+| `scripts/memory-doctor.*` | Read-only audit of the on-disk memory layout and of a declared `autoMemoryDirectory` |
 | `scripts/link-memory.*` | Migration with dry run, conflict refusal and rollback |
 | `examples/claim.md` | A worked coordination claim |
 | `examples/claude-settings.json` | Minimal native memory-directory settings file |
@@ -266,9 +288,12 @@ anything else.
 
 Nothing in the protocol changes between these — the store is a path.
 
-**If you sync, two things will bite you.** Each machine needs its own link or
+**If you sync, three things will bite you.** Each machine needs its own link or
 setting, because the path differs per machine; set one up, forget the other, and
-that one silently writes somewhere local. And on-demand files — OneDrive Files
+that one silently writes somewhere local. Worse, if the project lives inside the
+synced folder, its `.claude` settings sync too — so a correct absolute path
+written on one machine arrives broken on the other, and you did not forget
+anything. And on-demand files — OneDrive Files
 On-Demand, Google Drive streaming, iCloud Optimise Storage — leave placeholders
 that look like real files in a listing but fail on read. An agent hits a cloud
 error instead of the note, which surfaces as "permission denied" or an empty read.

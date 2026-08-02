@@ -86,6 +86,39 @@ Auto memory is enabled by default from Claude Code 2.1.59. It can be toggled in
 `/memory`; an explicit `autoMemoryEnabled: false` or
 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1` disables it.
 
+### When the project itself lives inside the synced store
+
+The advice above assumes the settings file stays on one machine. That assumption
+breaks when the project directory is inside iCloud Drive, Dropbox, OneDrive or an
+equivalent: `.claude/settings.local.json` is then a synced file like any other. A
+correct absolute path written on one machine arrives on the second machine, where
+it does not resolve, and the agent falls back to the path-derived layout and
+writes memory locally. Nobody forgot a step; the fix propagated the fault.
+
+`~/agent-memory/<project>` survives this, because `~` is resolved per machine. A
+path *into* the synced store generally does not, because providers mount at
+different places per platform — one vault is
+`~/Library/Mobile Documents/iCloud~md~obsidian/Documents/<name>` on macOS and
+`~/iCloudDrive/iCloud~md~obsidian/<name>` on Windows. No single absolute string is
+correct on both, and `~/` cannot bridge the difference either.
+
+Consequences, in order:
+
+1. Prefer a store that is **outside** the synced project, addressed as
+   `~/agent-memory/<project>`. The rule 1 mechanism then works unchanged.
+2. If memory must live inside the synced tree — because the notes are part of the
+   synced material — use a **per-machine link** and leave `autoMemoryDirectory`
+   unset. A link is per-machine by construction: it is keyed by a path that is
+   already local, so each machine holds its own correct entry. This inverts the
+   usual preference, and it is the one shape where it should be inverted.
+3. Never write a machine-specific absolute path into any file that syncs. This is
+   the general form, and it is worth stating separately because it also covers
+   hooks, wrapper scripts and editor configuration living beside the project.
+
+`memory-doctor` reports a declaration that violates this, along with a relative
+value and a directory that does not exist. It reports what cannot work; it does
+not claim to know which scope Claude Code actually applied.
+
 ### Verify the resolved state
 
 Configuration text is not proof that the running session uses it. Inside the

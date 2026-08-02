@@ -3,14 +3,23 @@
   agent-ops - memory doctor
 
 .DESCRIPTION
-  Audits the legacy/default <projects>/<slug>/memory layout. It does not attempt
-  to reproduce Claude Code settings precedence or workspace-trust decisions.
-  Confirm the active memory path in Claude Code with /memory or /context.
+  Audits the legacy/default <projects>/<slug>/memory layout. It still does not
+  reproduce Claude Code settings precedence or workspace-trust decisions, so the
+  active path for a session is whatever /memory or /context reports.
 
   A plain non-empty memory directory is at risk. A missing/broken/non-directory
   link is orphaned. A live external link is reported as LINKED but remains
   unverified unless -StableRoot is supplied; only containment in that root earns
   an OK result. A link back inside ProjectsDir is always at risk.
+
+  It additionally inspects the .claude settings of -ProjectDir (the current
+  directory by default) and reports a declared autoMemoryDirectory that CANNOT
+  work, without claiming to know which setting wins:
+    - a relative value, which the agent ignores in favour of the derived layout
+    - an absolute value pointing at a directory that does not exist
+    - an absolute value written in a settings file that is itself inside a
+      synced folder, which cannot be correct on two machines at once
+  Use -SkipSettingsCheck to audit the on-disk layout only.
 
   Exit codes:
     0  every discovered memory path is verified OK (or no memory exists)
@@ -21,12 +30,16 @@
   pwsh ./scripts/memory-doctor.ps1 -StableRoot "$HOME\agent-memory"
 .EXAMPLE
   pwsh ./scripts/memory-doctor.ps1 -ProjectsDir "$HOME\.some-agent\projects" -MemoryDirectoryName memory -Quiet
+.EXAMPLE
+  pwsh ./scripts/memory-doctor.ps1 -ProjectDir C:\git\my-app,C:\git\other-app
 #>
 [CmdletBinding()]
 param(
   [string] $ProjectsDir,
   [string] $MemoryDirectoryName = 'memory',
   [string] $StableRoot,
+  [string[]] $ProjectDir = @('.'),
+  [switch] $SkipSettingsCheck,
   [switch] $Quiet
 )
 
@@ -176,6 +189,73 @@ function Assert-SafeMemoryDirectoryName {
       $Value.IndexOfAny([IO.Path]::GetInvalidFileNameChars()) -ge 0) {
     throw 'MemoryDirectoryName must be one safe path segment'
   }
+}
+
+# Directory names used by the consumer sync clients. A settings file living under
+# one of these is copied to every other machine verbatim, so an absolute path
+# written into it can only ever be correct on the machine that wrote it.
+$script:SyncMarkers = @(
+  'Mobile Documents', 'com~apple~CloudDocs', 'iCloudDrive', 'iCloud Drive',
+  'Dropbox', 'OneDrive', 'Google Drive', 'GoogleDrive', 'Nextcloud', 'ownCloud',
+  'Sync.com', 'pCloudDrive', 'Syncthing'
+)
+
+function Test-PathLooksSynced {
+  param([Parameter(Mandatory)] [string] $Path)
+  $separators = [char[]] @([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  foreach ($segment in $Path.Split($separators, [StringSplitOptions]::RemoveEmptyEntries)) {
+    # iCloud vaults are named "iCloud~md~obsidian" and friends, so match the prefix.
+    if ($segment.StartsWith('iCloud~', [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    foreach ($marker in $script:SyncMarkers) {
+      if ([string]::Equals($segment, $marker, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+  }
+  return $false
+}
+
+function Expand-HomePath {
+  param([Parameter(Mandatory)] [string] $Path)
+  if ($Path -notmatch '^~[/\\]') { return $Path }
+  $userHome = if ([string]::IsNullOrWhiteSpace($HOME)) { $env:HOME } else { $HOME }
+  if ([string]::IsNullOrWhiteSpace($userHome)) {
+    $userHome = [System.Environment]::GetFolderPath('UserProfile')
+  }
+  if ([string]::IsNullOrWhiteSpace($userHome)) { return $Path }
+  return Join-Path $userHome $Path.Substring(2)
+}
+
+<#
+Read autoMemoryDirectory out of a project's .claude settings. Returns one record
+per settings file that declares it; a project with no declaration returns none.
+Local settings are listed last because that is the file a person edits by hand.
+#>
+function Get-DeclaredMemoryDirectory {
+  param([Parameter(Mandatory)] [string] $ProjectPath)
+
+  $results = [Collections.Generic.List[object]]::new()
+  foreach ($name in @('settings.json', 'settings.local.json')) {
+    $file = Join-Path (Join-Path $ProjectPath '.claude') $name
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+
+    $record = [pscustomobject]@{ File = $file; Value = $null; Problem = $null }
+    try {
+      $parsed = Get-Content -LiteralPath $file -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      $record.Problem = "cannot be read as JSON: $($_.Exception.Message)"
+      $results.Add($record)
+      continue
+    }
+    if ($null -eq $parsed -or -not $parsed.PSObject.Properties['autoMemoryDirectory']) { continue }
+
+    $value = $parsed.autoMemoryDirectory
+    if ($value -isnot [string] -or [string]::IsNullOrWhiteSpace($value)) {
+      $record.Problem = 'autoMemoryDirectory is not a non-empty string'
+    } else {
+      $record.Value = $value
+    }
+    $results.Add($record)
+  }
+  return $results
 }
 
 function Get-LinkTargetPath {
@@ -358,8 +438,89 @@ foreach ($project in $projects) {
   }
 }
 
+$settingsIssues = 0
+if (-not $SkipSettingsCheck -and $ProjectDir.Count -gt 0) {
+  $header = $false
+  foreach ($candidate in $ProjectDir) {
+    if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+    try {
+      $projectPath = Get-NormalizedFullPath $candidate
+    } catch {
+      $settingsIssues++
+      if (-not $header) { Write-Host ''; Write-Host 'declared memory directory (.claude settings):'; $header = $true }
+      '  {0,-11} {1,-40} project path cannot be resolved: {2}' -f 'INVALID', $candidate, $_.Exception.Message | Write-Host
+      continue
+    }
+
+    $declarations = @(Get-DeclaredMemoryDirectory $projectPath)
+    if ($declarations.Count -eq 0) {
+      if (-not $Quiet) {
+        if (-not $header) { Write-Host ''; Write-Host 'declared memory directory (.claude settings):'; $header = $true }
+        '  {0,-11} {1,-40} no autoMemoryDirectory declared' -f '-', $projectPath | Write-Host
+      }
+      continue
+    }
+
+    foreach ($declaration in $declarations) {
+      if (-not $header) { Write-Host ''; Write-Host 'declared memory directory (.claude settings):'; $header = $true }
+      $label = Split-Path -Leaf $declaration.File
+
+      if ($declaration.Problem) {
+        $settingsIssues++
+        '  {0,-11} {1,-40} {2}' -f 'INVALID', $label, $declaration.Problem | Write-Host
+        continue
+      }
+
+      $raw = $declaration.Value
+      # A relative value is not a different location - the agent discards it and
+      # silently falls back to the path-derived layout this tool is auditing.
+      if ($raw -notmatch '^~[/\\]' -and -not [IO.Path]::IsPathRooted($raw)) {
+        $settingsIssues++
+        '  {0,-11} {1,-40} relative value "{2}" is ignored; memory falls back to the derived layout' -f 'AT RISK', $label, $raw | Write-Host
+        continue
+      }
+
+      $expanded = Expand-HomePath $raw
+      try {
+        $resolved = Get-NormalizedFullPath $expanded
+      } catch {
+        $settingsIssues++
+        '  {0,-11} {1,-40} value "{2}" cannot be resolved: {3}' -f 'INVALID', $label, $raw, $_.Exception.Message | Write-Host
+        continue
+      }
+
+      # The trap this check exists for: the settings file syncs, the path does not.
+      if ((Test-PathLooksSynced $declaration.File) -and $raw -notmatch '^~[/\\]') {
+        $settingsIssues++
+        '  {0,-11} {1,-40} absolute path in a SYNCED settings file; it cannot be right on two machines' -f 'AT RISK', $label | Write-Host
+        continue
+      }
+
+      $targetItem = Get-ItemIfExists $resolved
+      if (-not $targetItem -or -not $targetItem.PSIsContainer) {
+        $settingsIssues++
+        '  {0,-11} {1,-40} -> {2} (declared directory does not exist)' -f 'AT RISK', $label, $resolved | Write-Host
+        continue
+      }
+
+      if ($stableRootFull -and -not (Test-PathInside -Child $resolved -Parent $stableRootFull -AllowEqual)) {
+        $settingsIssues++
+        '  {0,-11} {1,-40} -> {2} (outside StableRoot)' -f 'AT RISK', $label, $resolved | Write-Host
+        continue
+      }
+
+      if (-not $Quiet) {
+        '  {0,-11} {1,-40} -> {2}' -f 'OK', $label, $resolved | Write-Host
+      }
+    }
+  }
+}
+
 Write-Host ''
 Write-Host "$total project(s): $verified verified, $unverified unverified, $atRisk at risk, $orphans orphaned."
+if ($settingsIssues -gt 0) {
+  Write-Host "$settingsIssues declared memory directory issue(s)."
+}
 
 if ($unverified -gt 0) {
   Write-Host @'
@@ -385,5 +546,17 @@ Restore/mount the target before allowing an agent to write memory.
 '@
 }
 
-if ($atRisk -gt 0 -or $orphans -gt 0 -or $unverified -gt 0) { exit 1 }
+if ($settingsIssues -gt 0) {
+  Write-Host @'
+
+DECLARED MEMORY DIRECTORY - a .claude setting names a memory location that
+cannot work as written. This does not tell you which setting Claude Code
+actually applied; it tells you this one would fail if it were applied. A settings
+file inside a synced folder is the sharp case: it travels to your other machine,
+where an absolute path from this one does not resolve. Prefer a link there, or a
+path that is valid on every machine.
+'@
+}
+
+if ($atRisk -gt 0 -or $orphans -gt 0 -or $unverified -gt 0 -or $settingsIssues -gt 0) { exit 1 }
 exit 0

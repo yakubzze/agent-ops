@@ -498,6 +498,97 @@ run_test() {
   fi
 }
 
+make_settings_project() {
+  # $1 = declared value, $2 = parent directory name (a sync-client name makes the
+  # settings file "synced"), $3 = optional raw JSON payload
+  local value=$1 parent=${2:-plain-parent} raw=${3:-}
+  local project=$CASE_DIR/$parent/my-app
+  mkdir -p "$project/.claude" "$CASE_DIR/projects"
+  if [ -n "$raw" ]; then
+    printf '%s\n' "$raw" >"$project/.claude/settings.local.json"
+  else
+    printf '{ "autoMemoryDirectory": "%s" }\n' "$value" >"$project/.claude/settings.local.json"
+  fi
+  printf '%s\n' "$project"
+}
+
+test_doctor_flags_absolute_declaration_in_synced_settings() {
+  new_case
+  mkdir -p "$CASE_DIR/store"
+  # The failure this check exists for: the settings file travels to the other
+  # machine, where an absolute path written on this one cannot resolve.
+  project=$(make_settings_project "$CASE_DIR/store" Dropbox)
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project"
+  assert_status 1 || return 1
+  assert_contains 'SYNCED settings file' || return 1
+  assert_contains 'declared memory directory issue(s)' || return 1
+}
+
+test_doctor_allows_absolute_declaration_outside_sync() {
+  new_case
+  mkdir -p "$CASE_DIR/store"
+  project=$(make_settings_project "$CASE_DIR/store")
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project"
+  assert_status 0 || return 1
+  assert_contains '  OK' || return 1
+}
+
+test_doctor_treats_tilde_declaration_as_portable() {
+  new_case
+  # ~/ resolves per machine, so it is the one absolute-ish form that survives
+  # syncing. It must not be read as relative, nor as the synced-path trap.
+  project=$(make_settings_project '~/agent-memory/my-app' OneDrive)
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project"
+  assert_not_contains 'relative value' || return 1
+  assert_not_contains 'SYNCED settings file' || return 1
+}
+
+test_doctor_flags_relative_declaration() {
+  new_case
+  project=$(make_settings_project 'notes/memory')
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project"
+  assert_status 1 || return 1
+  assert_contains 'relative value' || return 1
+}
+
+test_doctor_flags_missing_declared_directory() {
+  new_case
+  project=$(make_settings_project "$CASE_DIR/never-created")
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project"
+  assert_status 1 || return 1
+  assert_contains 'does not exist' || return 1
+}
+
+test_doctor_skips_settings_on_request() {
+  new_case
+  project=$(make_settings_project 'notes/memory')
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project" --skip-settings-check
+  assert_status 0 || return 1
+  assert_not_contains 'declared memory directory' || return 1
+}
+
+test_doctor_reports_unparseable_settings() {
+  new_case
+  # Names the key and then fails to yield a value: both the jq path and the sed
+  # fallback must report it rather than read it as "nothing declared".
+  project=$(make_settings_project '' plain-parent '{ "autoMemoryDirectory": }')
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project"
+  assert_status 1 || return 1
+  assert_contains 'INVALID' || return 1
+}
+
+test_doctor_settings_check_survives_without_jq() {
+  new_case
+  mkdir -p "$CASE_DIR/store"
+  project=$(make_settings_project "$CASE_DIR/store" Dropbox)
+  # Exercise the sed fallback explicitly, so the path used on machines without
+  # jq is covered even when CI happens to have it installed.
+  run_cmd env AGENT_OPS_FORCE_JSON_FALLBACK=1 "$DOCTOR" \
+    --projects-dir "$CASE_DIR/projects" --project-dir "$project"
+  assert_status 1 || return 1
+  assert_contains 'SYNCED settings file' || return 1
+}
+
 run_test 'argument errors use exit 2' test_argument_errors_are_exit_2
 run_test 'relative dry run is read-only' test_relative_dry_run_is_read_only
 run_test 'every destination entry causes refusal' test_every_entry_causes_conflict_refusal
@@ -512,6 +603,14 @@ run_test 'doctor supports relative empty layout' test_doctor_relative_empty_layo
 run_test 'linker rejects unreadable regular files' test_linker_rejects_unreadable_regular_file
 run_test 'linker rejects an uninspectable project directory' test_linker_rejects_uninspectable_project_directory
 run_test 'doctor rejects an uninspectable projects root' test_doctor_rejects_uninspectable_projects_root
+run_test 'doctor flags an absolute declaration in a synced settings file' test_doctor_flags_absolute_declaration_in_synced_settings
+run_test 'doctor allows an absolute declaration outside a synced folder' test_doctor_allows_absolute_declaration_outside_sync
+run_test 'doctor treats a ~/ declaration as portable' test_doctor_treats_tilde_declaration_as_portable
+run_test 'doctor flags a relative declaration as ignored' test_doctor_flags_relative_declaration
+run_test 'doctor flags a declared directory that does not exist' test_doctor_flags_missing_declared_directory
+run_test 'doctor skips the settings check on request' test_doctor_skips_settings_on_request
+run_test 'doctor reports unparseable settings' test_doctor_reports_unparseable_settings
+run_test 'doctor settings check works without jq' test_doctor_settings_check_survives_without_jq
 
 if [ "$NATIVE_LINKS" -eq 1 ]; then
   run_test 'nested symbolic links are refused without mutation' test_linker_rejects_nested_symbolic_links
