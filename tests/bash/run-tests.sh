@@ -512,6 +512,27 @@ make_settings_project() {
   printf '%s\n' "$project"
 }
 
+test_doctor_handles_an_empty_projects_directory() {
+  new_case
+  # A fresh install has nothing to scan. Expanding the empty glob array under
+  # `set -u` aborts on Bash 3.2, which macOS still ships, so this reports zero
+  # projects rather than crashing.
+  mkdir -p "$CASE_DIR/projects"
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --skip-settings-check
+  assert_status 0 || return 1
+  assert_contains '0 project(s)' || return 1
+  assert_not_contains 'unbound variable' || return 1
+}
+
+test_linker_rejects_the_filesystem_root_without_crashing() {
+  new_case
+  mkdir -p "$CASE_DIR/projects/p/memory"
+  # Same Bash 3.2 empty-array trap on the linker's path canonicaliser: "/" has
+  # no components. The caller must get the normal refusal, not a crash.
+  run_cmd linker --project p --projects-dir "$CASE_DIR/projects" --store / --dry-run
+  assert_not_contains 'unbound variable' || return 1
+}
+
 test_doctor_flags_absolute_declaration_in_synced_settings() {
   new_case
   mkdir -p "$CASE_DIR/store"
@@ -537,6 +558,7 @@ test_doctor_treats_tilde_declaration_as_portable() {
   new_case
   # ~/ resolves per machine, so it is the one absolute-ish form that survives
   # syncing. It must not be read as relative, nor as the synced-path trap.
+  # shellcheck disable=SC2088  # the tilde is the literal value under test
   project=$(make_settings_project '~/agent-memory/my-app' OneDrive)
   run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$project"
   assert_not_contains 'relative value' || return 1
@@ -603,6 +625,8 @@ run_test 'doctor supports relative empty layout' test_doctor_relative_empty_layo
 run_test 'linker rejects unreadable regular files' test_linker_rejects_unreadable_regular_file
 run_test 'linker rejects an uninspectable project directory' test_linker_rejects_uninspectable_project_directory
 run_test 'doctor rejects an uninspectable projects root' test_doctor_rejects_uninspectable_projects_root
+run_test 'doctor handles an empty projects directory' test_doctor_handles_an_empty_projects_directory
+run_test 'linker refuses the filesystem root without crashing' test_linker_rejects_the_filesystem_root_without_crashing
 run_test 'doctor flags an absolute declaration in a synced settings file' test_doctor_flags_absolute_declaration_in_synced_settings
 run_test 'doctor allows an absolute declaration outside a synced folder' test_doctor_allows_absolute_declaration_outside_sync
 run_test 'doctor treats a ~/ declaration as portable' test_doctor_treats_tilde_declaration_as_portable

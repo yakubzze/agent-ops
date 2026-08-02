@@ -148,7 +148,10 @@ canonicalize_directory_path() {
   esac
 
   IFS=/ read -r -a components <<< "${absolute#/}"
-  for component in "${components[@]}"; do
+  # A path of exactly "/" leaves no components, and expanding an empty array
+  # under `set -u` aborts on Bash 3.2 (macOS). Guard it so the caller gets the
+  # normal refusal instead of an unbound-variable crash.
+  for component in "${components[@]+"${components[@]}"}"; do
     case "$component" in
       ''|.) continue ;;
       ..) return 2 ;;

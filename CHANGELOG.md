@@ -31,6 +31,14 @@ formats and command behaviour.
   existing pre-flight check will now catch this class. Use
   `--skip-settings-check` to keep the previous scope.
 
+### Fixed
+
+- `memory-doctor.sh` aborted with `unbound variable` instead of reporting an
+  empty scan when the projects directory contained no projects, on Bash 3.2 —
+  the version macOS still ships. A first run on a clean machine hit this.
+- `link-memory.sh` hit the same empty-array trap while canonicalising a path of
+  `/`, crashing instead of refusing the input.
+
 ## [0.1.0-preview] - 2026-07-31
 
 ### Added

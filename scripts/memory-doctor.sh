@@ -131,6 +131,9 @@ path_looks_synced() {
 }
 
 expand_home() {
+  # shellcheck disable=SC2088  # The tilde is DATA here - a literal prefix inside
+  # a settings value we are inspecting, matched and stripped on purpose. Letting
+  # the shell expand it would defeat the check.
   case $1 in
     '~/'*) printf '%s\n' "${HOME}/${1#'~/'}" ;;
     *) printf '%s\n' "$1" ;;
@@ -259,7 +262,11 @@ shopt -s dotglob nullglob
 project_dirs=("$PROJECTS_DIR"/*/)
 shopt -u dotglob nullglob
 
-for project_dir in "${project_dirs[@]}"; do
+# An empty projects directory leaves an empty array, and expanding one under
+# `set -u` is an unbound-variable error in Bash 3.2 — still what macOS ships.
+# `${arr[@]+...}` is the portable guard; a fresh install has nothing to scan yet
+# and must report that, not abort.
+for project_dir in "${project_dirs[@]+"${project_dirs[@]}"}"; do
   [ -d "$project_dir" ] || continue
   slug=$(basename "$project_dir")
   mem="${project_dir%/}/memory"
@@ -380,6 +387,7 @@ if [ "$SKIP_SETTINGS" -eq 0 ]; then
 
       # A relative value is not a different location - the agent discards it and
       # silently falls back to the path-derived layout this tool is auditing.
+      # shellcheck disable=SC2088  # literal prefix of a value being classified
       case $declared in
         /*|'~/'*) ;;
         *)
@@ -391,6 +399,7 @@ if [ "$SKIP_SETTINGS" -eq 0 ]; then
       esac
 
       # The trap this check exists for: the settings file syncs, the path does not.
+      # shellcheck disable=SC2088  # literal prefix of a value being classified
       case $declared in
         '~/'*) ;;
         *)
