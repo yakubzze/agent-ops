@@ -6,9 +6,39 @@ formats and command behaviour.
 
 ## [Unreleased]
 
+### Added
+
+- `memory-doctor` hook mode, `-Hook` / `--hook`, for a `SessionStart` hook. It
+  implies quiet, prints nothing when the result is healthy, and otherwise prints
+  a compact plain-text report on stdout: the entries that need attention (at
+  most 12; the rest are counted), the counts, one line per category, and the
+  command for the full report with the exit code a manual run returns. It exits
+  0 whatever it finds, because Claude Code adds a `SessionStart` hook's
+  plain-text stdout to the agent's context only on exit 0 (Claude Code 2.1.283
+  [hooks reference](https://code.claude.com/docs/en/hooks), read 2026-09-30).
+  The previous `-Quiet` hook exited 1, so its diagnosis never reached the agent
+  and dangling memory links went unnoticed for weeks. The PowerShell report is
+  UTF-8 whatever the console code page. A PowerShell parameter that cannot be
+  bound at all, such as a missing value, still fails before the script runs.
+- `UNREADABLE`: a link whose target exists and is a directory, but whose content
+  cannot be fully read — a permission error, a directory that cannot be entered,
+  or a cloud placeholder that failed to download — has its own label, legend and
+  count. It still fails the audit (exit 1 without the hook flag).
+
 ### Changed
 
-- Nothing yet.
+- A read failure inside an existing link target was reported as `ORPHAN` ("the
+  link target is missing") by the PowerShell doctor and as `INVALID` by the Bash
+  doctor. Both now report `UNREADABLE`, so a healthy store with one file that
+  failed to hydrate is no longer described as missing. The Bash doctor also
+  reports a target directory it cannot enter as `UNREADABLE`, where it said
+  `INVALID` ("target cannot be inspected").
+- `memory-doctor.ps1` reports an unknown parameter as invalid input,
+  `error: unknown argument: …`, with exit 2. It used to fail in PowerShell's
+  parameter binding with exit 1 and a message on stderr only.
+- The doctor's summary line includes an `unreadable` count.
+- The README's `SessionStart` example uses `-Hook` / `--hook` in place of
+  `-Quiet` / `--quiet`.
 
 ## [0.2.0-preview] - 2026-08-02
 

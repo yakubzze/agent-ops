@@ -24,6 +24,8 @@ SKIPPED=0
 CASE_NUMBER=0
 STATUS=0
 OUTPUT=""
+# A test that returns 77 may say why here; run_test resets it per test.
+SKIP_REASON=""
 
 linker() {
   PATH="$FAKE_BIN:$PATH" "$LINKER" "$@"
@@ -39,6 +41,27 @@ run_cmd() {
   STATUS=$?
   set -e
   return 0
+}
+
+# Hook mode depends on the report being on stdout: Claude Code drops a hook's
+# stderr on exit 0. This keeps the two apart; stderr lands in ERR_OUTPUT.
+ERR_OUTPUT=""
+run_cmd_split() {
+  local err_file=$TEST_ROOT/stderr-capture
+  set +e
+  OUTPUT=$("$@" 2>"$err_file")
+  STATUS=$?
+  set -e
+  ERR_OUTPUT=$(command cat "$err_file")
+  rm -f "$err_file"
+  return 0
+}
+
+assert_no_stderr() {
+  if [ -n "$ERR_OUTPUT" ]; then
+    printf '    expected nothing on stderr, got:\n%s\n' "$ERR_OUTPUT" >&2
+    return 1
+  fi
 }
 
 new_case() {
@@ -463,26 +486,232 @@ test_doctor_internal_link_is_always_at_risk() {
   assert_not_contains '  OK' || return 1
 }
 
-test_doctor_never_okays_an_unreadable_file() {
+# The target exists; one file inside it cannot be read. Measured 2026-09-30: an
+# iCloud file that failed to hydrate got the whole link called missing, which
+# invites recreating a directory that is still there.
+test_doctor_labels_unreadable_target_content() {
   new_case
-  mkdir -p "$CASE_DIR/projects/p" "$CASE_DIR/store/p"
-  printf 'secret bytes\n' >"$CASE_DIR/store/p/unreadable.bin"
-  ln -s "$CASE_DIR/store/p" "$CASE_DIR/projects/p/memory" || return 1
-  chmod 000 "$CASE_DIR/store/p/unreadable.bin" || return 77
-  if command cat "$CASE_DIR/store/p/unreadable.bin" >/dev/null 2>&1; then
-    chmod 600 "$CASE_DIR/store/p/unreadable.bin" || true
+  if [ "$(id -u)" -eq 0 ]; then
+    SKIP_REASON='running as root, which reads a mode-000 file anyway'
     return 77
   fi
-  run_cmd doctor --projects-dir "$CASE_DIR/projects" --stable-root "$CASE_DIR/store"
+  # p: one file in the target cannot be read. q: the target directory itself
+  # cannot be entered. Both targets exist and are directories.
+  mkdir -p "$CASE_DIR/projects/p" "$CASE_DIR/projects/q" "$CASE_DIR/store/p" "$CASE_DIR/store/q"
+  printf 'fine\n' >"$CASE_DIR/store/p/readable.md"
+  printf 'secret bytes\n' >"$CASE_DIR/store/p/unreadable.bin"
+  printf 'fine\n' >"$CASE_DIR/store/q/readable.md"
+  ln -s "$CASE_DIR/store/p" "$CASE_DIR/projects/p/memory" || return 1
+  ln -s "$CASE_DIR/store/q" "$CASE_DIR/projects/q/memory" || return 1
+  chmod 000 "$CASE_DIR/store/p/unreadable.bin" "$CASE_DIR/store/q" || return 77
+  if command cat "$CASE_DIR/store/p/unreadable.bin" >/dev/null 2>&1 ||
+    (cd "$CASE_DIR/store/q" 2>/dev/null); then
+    chmod 600 "$CASE_DIR/store/p/unreadable.bin" || true
+    chmod 700 "$CASE_DIR/store/q" || true
+    return 77
+  fi
+  local manual_status manual_output
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --stable-root "$CASE_DIR/store" --project-dir "$CASE_DIR"
+  manual_status=$STATUS
+  manual_output=$OUTPUT
+  run_cmd_split doctor --hook --projects-dir "$CASE_DIR/projects" --stable-root "$CASE_DIR/store" --project-dir "$CASE_DIR"
   chmod 600 "$CASE_DIR/store/p/unreadable.bin" || true
+  chmod 700 "$CASE_DIR/store/q" || true
+  if ! command cat "$CASE_DIR/store/p/unreadable.bin" >/dev/null 2>&1 ||
+    ! command cat "$CASE_DIR/store/q/readable.md" >/dev/null 2>&1; then
+    printf '    the test did not restore read access\n' >&2
+    return 1
+  fi
+
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  assert_contains 'UNREADABLE' || return 1
+  assert_contains 'UNREADABLE: the target exists but some content could not be read' || return 1
+
+  STATUS=$manual_status
+  OUTPUT=$manual_output
   assert_status 1 || return 1
-  assert_contains 'INVALID' || return 1
+  assert_contains 'UNREADABLE' || return 1
+  assert_contains 'unreadable.bin' || return 1
+  assert_contains 'cannot enter the target directory' || return 1
+  assert_contains '0 orphaned, 2 unreadable, 0 invalid.' || return 1
+  assert_contains 'It is not missing and must not be recreated' || return 1
+  assert_not_contains 'ORPHAN' || return 1
+  assert_not_contains 'INVALID' || return 1
   assert_not_contains '  OK' || return 1
+}
+
+# Claude Code adds a SessionStart hook's plain-text stdout to the agent's context
+# only on exit 0 (Claude Code 2.1.283 hooks reference, read 2026-09-30). A doctor
+# that exits 1 there has its diagnosis dropped - which is how dangling links went
+# unnoticed for weeks.
+test_doctor_hook_is_silent_when_healthy() {
+  new_case
+  mkdir -p "$CASE_DIR/projects/p/memory"
+  run_cmd_split doctor --hook --projects-dir "$CASE_DIR/projects" --project-dir "$CASE_DIR"
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  [ -z "$OUTPUT" ] || {
+    printf '    a healthy hook run must print nothing, got:\n%s\n' "$OUTPUT" >&2
+    return 1
+  }
+}
+
+test_doctor_hook_reports_problems_and_exits_0() {
+  new_case
+  # A space and an apostrophe force quoting in the printed full-report command.
+  local projects="$CASE_DIR/team's projects" quiet_output line full
+  mkdir -p "$projects/p/memory"
+  printf 'x\n' >"$projects/p/memory/state.md"
+
+  run_cmd doctor --quiet --projects-dir "$projects" --project-dir "$CASE_DIR"
+  assert_status 1 || return 1
+  quiet_output=$OUTPUT
+
+  run_cmd_split doctor --hook --projects-dir "$projects" --project-dir "$CASE_DIR"
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  case $OUTPUT in
+    'agent-ops memory doctor: agent memory needs attention.'*) ;;
+    *)
+      printf '    hook report does not open with the lead line:\n%s\n' "$OUTPUT" >&2
+      return 1
+      ;;
+  esac
+  assert_contains 'AT RISK' || return 1
+  assert_contains '1 project(s): 0 verified, 0 linked/unverified, 1 at risk, 0 orphaned, 0 unreadable, 0 invalid.' || return 1
+  assert_contains 'AT RISK: memory sits in the path-derived layout' || return 1
+  assert_contains 'A manual run exits 1. Full report: bash ' || return 1
+  assert_not_contains 'legacy/default-layout scan' || return 1
+  assert_not_contains '--hook' || return 1
+  assert_not_contains "$(printf '\033[')" || return 1
+
+  # The problem lines are exactly what --quiet prints.
+  while IFS= read -r line; do
+    case $line in
+      '  '*) assert_contains "$line" || return 1 ;;
+    esac
+  done <<EOF
+$quiet_output
+EOF
+
+  # The printed command reproduces the manual run.
+  full=${OUTPUT##*Full report: }
+  run_cmd eval "$full"
+  assert_status 1 || return 1
+  assert_contains 'legacy/default-layout scan' || return 1
+
+  # Without the flag nothing changes: a gate still fails.
+  run_cmd doctor --projects-dir "$projects" --project-dir "$CASE_DIR"
+  assert_status 1 || return 1
+}
+
+test_doctor_hook_reports_argument_errors_and_exits_0() {
+  new_case
+  run_cmd_split doctor --hook --no-such-option
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  assert_contains 'agent memory needs attention; the audit could not run.' || return 1
+  assert_contains 'error: unknown argument: --no-such-option' || return 1
+  assert_contains 'A manual run exits 2.' || return 1
+
+  # --hook after the bad argument is still honoured.
+  run_cmd_split doctor --no-such-option --hook
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  assert_contains 'error: unknown argument: --no-such-option' || return 1
+
+  run_cmd_split doctor --hook --stable-root
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  assert_contains 'error: --stable-root requires a non-empty value' || return 1
+  assert_contains 'A manual run exits 2.' || return 1
+
+  run_cmd_split doctor --hook --projects-dir "$CASE_DIR/missing"
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  assert_contains 'no readable legacy/default projects directory' || return 1
+  assert_contains 'A manual run exits 2.' || return 1
+
+  run_cmd doctor --no-such-option
+  assert_status 2 || return 1
+}
+
+# A failure under `set -e` ends the audit early, and its message goes to stderr,
+# which Claude Code drops on exit 0. The report must still say that it stopped.
+test_doctor_hook_reports_an_unexpected_failure() {
+  new_case
+  mkdir -p "$CASE_DIR/projects/p/memory" "$CASE_DIR/fail-bin"
+  printf '#!/usr/bin/env sh\nexit 1\n' >"$CASE_DIR/fail-bin/basename"
+  chmod +x "$CASE_DIR/fail-bin/basename"
+  # Passed by name to run_cmd_split.
+  # shellcheck disable=SC2329,SC2317
+  failing_doctor() {
+    PATH="$CASE_DIR/fail-bin:$PATH" "$DOCTOR" "$@"
+  }
+  run_cmd failing_doctor --projects-dir "$CASE_DIR/projects" --project-dir "$CASE_DIR"
+  assert_status 1 || return 1
+
+  run_cmd_split failing_doctor --hook --projects-dir "$CASE_DIR/projects" --project-dir "$CASE_DIR"
+  assert_status 0 || return 1
+  case $OUTPUT in
+    'agent-ops memory doctor: agent memory needs attention.'*) ;;
+    *)
+      printf '    hook report does not open with the lead line:\n%s\n' "$OUTPUT" >&2
+      return 1
+      ;;
+  esac
+  assert_contains 'error: the audit stopped early (exit 1); the full report shows why.' || return 1
+  assert_contains 'A manual run exits 1. Full report: bash ' || return 1
+  assert_not_contains 'project(s):' || return 1
+}
+
+# The report lands in every session's context, and Claude Code 2.1.283 keeps a
+# hook's plain stdout whole only up to 10,000 characters.
+test_doctor_hook_caps_the_lines_it_prints() {
+  new_case
+  local i count=0 line
+  for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14; do
+    mkdir -p "$CASE_DIR/projects/p$i/memory"
+    printf 'x\n' >"$CASE_DIR/projects/p$i/memory/state.md"
+  done
+  run_cmd_split doctor --hook --projects-dir "$CASE_DIR/projects" --project-dir "$CASE_DIR"
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  while IFS= read -r line; do
+    case $line in
+      '  AT RISK '*) count=$((count + 1)) ;;
+    esac
+  done <<EOF
+$OUTPUT
+EOF
+  [ "$count" -eq 12 ] || {
+    printf '    expected 12 problem lines, got %s:\n%s\n' "$count" "$OUTPUT" >&2
+    return 1
+  }
+  assert_contains '... and 2 more line(s); the full report lists every entry.' || return 1
+  assert_contains '14 project(s): 0 verified, 0 linked/unverified, 14 at risk' || return 1
+  assert_contains 'A manual run exits 1. Full report: bash ' || return 1
+}
+
+test_doctor_hook_reports_an_orphan() {
+  new_case
+  mkdir -p "$CASE_DIR/projects/p"
+  ln -s "$CASE_DIR/missing" "$CASE_DIR/projects/p/memory" || return 1
+  run_cmd_split doctor --hook --projects-dir "$CASE_DIR/projects" --project-dir "$CASE_DIR"
+  assert_status 0 || return 1
+  assert_no_stderr || return 1
+  assert_contains 'ORPHAN' || return 1
+  assert_contains 'ORPHAN: the link target is missing' || return 1
+  assert_contains 'A manual run exits 1.' || return 1
+  run_cmd doctor --projects-dir "$CASE_DIR/projects" --project-dir "$CASE_DIR"
+  assert_status 1 || return 1
 }
 
 run_test() {
   local name=$1 result
   shift
+  SKIP_REASON=""
   if "$@"; then
     PASSED=$((PASSED + 1))
     printf 'ok %s - %s\n' "$PASSED" "$name"
@@ -490,7 +719,7 @@ run_test() {
     result=$?
     if [ "$result" -eq 77 ]; then
       SKIPPED=$((SKIPPED + 1))
-      printf 'ok - %s # SKIP filesystem does not enforce test permissions\n' "$name"
+      printf 'ok - %s # SKIP %s\n' "$name" "${SKIP_REASON:-filesystem does not enforce test permissions}"
     else
       FAILED=$((FAILED + 1))
       printf 'not ok - %s\n' "$name" >&2
@@ -635,6 +864,11 @@ run_test 'doctor flags a declared directory that does not exist' test_doctor_fla
 run_test 'doctor skips the settings check on request' test_doctor_skips_settings_on_request
 run_test 'doctor reports unparseable settings' test_doctor_reports_unparseable_settings
 run_test 'doctor settings check works without jq' test_doctor_settings_check_survives_without_jq
+run_test 'doctor hook mode is silent and exits 0 when healthy' test_doctor_hook_is_silent_when_healthy
+run_test 'doctor hook mode reports problems on stdout and exits 0' test_doctor_hook_reports_problems_and_exits_0
+run_test 'doctor hook mode reports argument errors and exits 0' test_doctor_hook_reports_argument_errors_and_exits_0
+run_test 'doctor hook mode reports an unexpected failure and exits 0' test_doctor_hook_reports_an_unexpected_failure
+run_test 'doctor hook mode caps the problem lines it prints' test_doctor_hook_caps_the_lines_it_prints
 
 if [ "$NATIVE_LINKS" -eq 1 ]; then
   run_test 'nested symbolic links are refused without mutation' test_linker_rejects_nested_symbolic_links
@@ -644,9 +878,10 @@ if [ "$NATIVE_LINKS" -eq 1 ]; then
   run_test 'a concurrent destination write is preserved during rollback' test_destination_write_during_failure_is_preserved
   run_test 'doctor distinguishes unverified, orphan, invalid and verified' test_doctor_verification_orphan_and_invalid
   run_test 'doctor rejects links inside the projects tree' test_doctor_internal_link_is_always_at_risk
-  run_test 'doctor never reports OK for an unreadable file' test_doctor_never_okays_an_unreadable_file
+  run_test 'doctor labels unreadable target content UNREADABLE, never OK' test_doctor_labels_unreadable_target_content
+  run_test 'doctor hook mode reports an orphan and exits 0' test_doctor_hook_reports_an_orphan
 else
-  SKIPPED=$((SKIPPED + 8))
+  SKIPPED=$((SKIPPED + 9))
   printf 'ok - nested symbolic-link refusal # SKIP native symlinks unavailable\n'
   printf 'ok - success handles spaces/Unicode and is idempotent # SKIP native symlinks unavailable\n'
   printf 'ok - existing-link nested symbolic-link refusal # SKIP native symlinks unavailable\n'
@@ -654,7 +889,8 @@ else
   printf 'ok - concurrent destination-write preservation # SKIP native symlinks unavailable\n'
   printf 'ok - doctor symlink classifications # SKIP native symlinks unavailable\n'
   printf 'ok - doctor internal-link refusal # SKIP native symlinks unavailable\n'
-  printf 'ok - doctor unreadable-file refusal # SKIP native symlinks unavailable\n'
+  printf 'ok - doctor UNREADABLE target content # SKIP native symlinks unavailable\n'
+  printf 'ok - doctor hook-mode orphan report # SKIP native symlinks unavailable\n'
 fi
 
 printf '\n%s passed, %s failed, %s skipped\n' "$PASSED" "$FAILED" "$SKIPPED"

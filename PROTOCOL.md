@@ -172,6 +172,18 @@ Claude Code's effective `autoMemoryDirectory`; after switching to the native
 setting, an old real directory can be inactive even if the doctor labels it
 `AT RISK`. Check `/memory` before acting.
 
+A link whose target is missing, or that cannot itself be read, is `ORPHAN`; a
+target that is not a directory is `ORPHAN` in the PowerShell doctor and `INVALID`
+in the Bash doctor. A link whose target exists and is a directory, but holds
+content that cannot be fully read — a permission error, a directory that cannot be
+entered, or a cloud placeholder that failed to download — is `UNREADABLE` in both.
+Both fail the audit, because an unread file is not a
+verified one; they differ in the fix. Measured on 2026-09-30: one iCloud file that
+failed to hydrate got a healthy store labelled `ORPHAN`, "the link target is
+missing". The natural response to a missing target is to recreate it, which is
+wrong for a directory that is still there. Retry an `UNREADABLE` store once sync
+settles, and keep it always available offline.
+
 On Windows, use the PowerShell linker. A Git Bash `ln -s` may copy instead of
 linking in common configurations, which produces two plausible directories that
 drift. The shell linker refuses Windows environments for that reason.

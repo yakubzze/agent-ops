@@ -106,6 +106,11 @@ needs attention, so it works as a pre-flight check. Pass `-StableRoot` (or
 `--stable-root`) to have it verify that links actually land inside the store you
 chose, rather than just that they resolve.
 
+A link whose store is gone is `ORPHAN`. A link whose store is there but holds a
+file that cannot be read — a permission error, or a cloud placeholder that failed
+to download — is `UNREADABLE`: still a failure, but not a missing store, so do not
+recreate it. Let sync settle and run the doctor again.
+
 It also reads the `.claude` settings of the current directory and reports a
 declared `autoMemoryDirectory` that cannot work as written — a relative value the
 agent will ignore, a directory that does not exist, or an absolute path in a
@@ -193,7 +198,7 @@ hook runs the doctor before you type anything:
               "-NoProfile",
               "-File",
               "<path-to>/agent-ops/scripts/memory-doctor.ps1",
-              "-Quiet",
+              "-Hook",
               "-StableRoot",
               "<your-store-root>"
             ],
@@ -207,8 +212,25 @@ hook runs the doctor before you type anything:
 ```
 
 On macOS and Linux, run `bash` against `<path-to>/agent-ops/scripts/memory-doctor.sh`
-with `--quiet --stable-root <your-store-root>`. `--quiet` prints only entries that
-need attention, so a healthy setup adds nothing to your session.
+with `--hook --stable-root <your-store-root>`. Hook mode prints nothing while
+everything is healthy, so a clean setup adds nothing to your session. Otherwise it
+prints a short report: the entries that need attention (at most 12, so the report
+stays well inside the 10,000 characters of hook output Claude Code passes on
+whole), the counts, one line per problem category, and the command that shows the
+full report.
+
+**The hook must exit 0, or the agent never sees the report.** Claude Code adds a
+`SessionStart` hook's plain-text stdout to the agent's context only when the hook
+exits 0; on any other exit code the output is dropped and the session shows at
+most a one-line hook error ([hooks reference](https://code.claude.com/docs/en/hooks),
+read 2026-09-30, Claude Code 2.1.283). The doctor's own exit 1 therefore silenced
+its diagnosis. Measured on 2026-09-30: a setup running this hook with `-Quiet`
+found dangling memory links at every session start, exited 1 every time, and the
+links went unnoticed for weeks. `-Hook` / `--hook` exits 0 whatever it finds, and
+names in its last line the code a manual run returns. Without the flag, manual and
+CI runs keep exit codes 1 and 2. One gap is PowerShell's own: a parameter it
+cannot bind at all, such as `-StableRoot` with no value, fails before the script
+runs and still shows only as a hook error, so run the hook command once by hand.
 
 **Put this in `~/.claude/settings.json`, not in a repository.** Both values in it
 are facts about one machine — where you cloned this repo and where your store
@@ -217,17 +239,20 @@ project, which is what you want: the failure this catches is not project-specifi
 and a per-project copy would miss the projects you forgot to configure. Nothing
 about wiring the check needs to be committed anywhere.
 
-> **A check that always fails is not a check.** The doctor exits non-zero while
-> anything needs attention. That is what makes it usable as a gate — and useless
-> the moment you leave something unattended. Two entries you have decided to live
-> with mean every session opens red, and the day a third one appears, nothing
+> **A check that always fails is not a check.** The doctor flags anything that
+> needs attention — a non-zero exit when run by hand, a report in the session when
+> run as a hook. That is what makes it usable as a gate — and useless the moment
+> you leave something unattended. Two entries you have decided to live with mean
+> every session opens with a report, and the day a third one appears, nothing
 > about the output looks different.
 >
-> Measured: a setup running this exact hook carried two `AT RISK` entries for
-> months. When a directory move silently orphaned two more links, the summary went
-> from "2 at risk" to "2 at risk, 2 orphaned" at the top of every session, and
-> nobody read it. Both orphans were found later, by hand, during an unrelated
-> audit — with the alarm running correctly the whole time.
+> Measured: a setup running the doctor at every session start carried two
+> `AT RISK` entries for months, so a failing doctor was already the normal state.
+> When a directory move silently orphaned two more links, no session looked any
+> different — and, as the hooks reference above says, the report of a hook that
+> exits 1 never reached the agent at all. Both orphans were found later, by hand,
+> during an unrelated audit — with the doctor detecting them correctly at every
+> session start the whole time.
 >
 > Drive it to zero and keep it there. Fix an entry, or move its data somewhere the
 > doctor calls stable. "Known bad, ignore it" is not a state you can hold for one
@@ -355,8 +380,9 @@ anything. And on-demand files — OneDrive Files
 On-Demand, Google Drive streaming, iCloud Optimise Storage — leave placeholders
 that look like real files in a listing but fail on read. An agent hits a cloud
 error instead of the note, which surfaces as "permission denied" or an empty read.
-Neither looks like "this was never downloaded". Pin the store to always-keep-local,
-and watch for conflict copies like `MEMORY 2.md`.
+Neither looks like "this was never downloaded". The doctor reports it as
+`UNREADABLE` rather than calling the store missing. Pin the store to
+always-keep-local, and watch for conflict copies like `MEMORY 2.md`.
 
 ### Before you sync anything
 
